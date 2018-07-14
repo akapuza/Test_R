@@ -1,0 +1,241 @@
+---
+title: 'Контрольная Капуза'
+date: 'Июль, 12, 2018'
+output:
+  html_document:
+    keep_md: no
+    number_sections: yes
+    toc: yes
+lang: ru-RU
+editor_options:
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r}  
+library(rio)
+library(tidyverse)
+library(dplyr)
+library(ggalluvial)
+library(skimr)
+library(corrplot)
+library(ggpubr)
+library(broom)
+library(GGally)
+library(lmtest)
+library(cluster) 
+library(factoextra) 
+library(dendextend) 
+library(sjPlot)
+library(caret) 
+library(FFTrees) 
+library(margins) 
+library(rpart.plot) 
+library(plotROC)
+```
+
+
+
+Для анализа используется база данных лонгитюдного иследования Института образования НИУ ВШЭ "Траектории в образовании и профессии". 
+
+
+```{r}
+data <- import('finlallw4R.dta')
+glimpse(data)
+```
+Набор данных содержит 4894 наблюдения и 34 переменных. Из них мы будем использовать только 7:
+
+  math_lev3 - уровень математической грамотности респондента по тесту PISA-2012 (низкий/средний/высокий)
+  np2study - где респондент обучается в 2013 г. после 9 класса (нигде/в школе/в СПО)
+  np2wish - какой максимальный уровень образования респондент хочет получить (опрос в 2013 г.) (школа/СПО/высшее/2 высших или кандидат наук)
+  np4_q7 - балл ЕГЭ по математике (только для тех, кто закончил 11 классов)
+  wherenp5 - где респондент обучается в 2015 г. (нигде и не работает/нигде и работает/СПО/высшее образование)
+  np5_q79 - личный доход в 2015 г.
+  np5_q55 - ожидаемая зарплата после окончания ВУЗа (только для респондентов, обучающихся в ВУЗе)
+  np5plan - планирует ли респондент продолжать обучение (2015 г.) (нет/да)
+
+Первые пять должны быть факторнымы, ожидаемая зарплата - остаться в формате dbl.
+```{r}
+data_fct <- mutate(data, math_lev3 = factor(math_lev3), np2study = factor(np2study), np2wish  = factor(np2wish), wherenp5 = factor(wherenp5), np5_q79 = factor(np5_q79), np5plans = factor (np5plans) )
+
+data_fct <- mutate(data_fct, np5_q79 = fct_collapse(np5_q79, "7" = c('7', '8', '9', '10')))
+```
+
+Кроме того, в дальнейшем нам понадобятся лейблы значения для построения графиков.
+```{r}
+levels(data_fct$math_lev3) <- c("Низкий", "Средний", "Высокий")
+levels(data_fct$np2study) <- c("Не учится", "Школа", "СПО")
+levels(data_fct$np2wish) <- c("Школа", "СПО", "ВО", "2 ВО или степень")
+levels(data_fct$wherenp5) <- c("Не учится и не работает", "Не учится и работает", "СПО", "ВО")
+levels(data_fct$np5_q79) <- c("<5 тыс.", "5-10 тыс.", "10-15 тыс.", "15-20 тыс.", "20-25 тыс.", "25-30 тыс.", ">30 тыс.")
+```
+
+
+# Описательная статистика
+Построим гистограммы для переменных, показывающих место обучения респондентов в волне 2 и в волне 5  
+```{r}
+ggplot(data = data_fct) +
+  geom_histogram(aes(x = math_lev3), fill = "#2F4F4F",  stat="count") +
+  labs(x = 'Уровень математической грамотности', y = 'Количество учеников' , title = 'Распределение по уровню математической грамотности') +
+  theme_bw()
+
+
+ggplot(data = data_fct) +
+  geom_histogram(aes(x = np2study), fill = "#2F4F4F", stat="count") +
+  labs(x = 'Место обучения', y  = 'Количество учеников' , title = 'Где учились респонденты в 2013 году?') +
+  theme_bw()
+
+
+ggplot(data = data_fct) +
+  geom_histogram(aes(x = wherenp5), fill = "#2F4F4F", stat="count") +
+  labs(x = 'Место обучения', y = 'Количество учеников' , title = 'Где учились респонденты в 2015 году?') +
+  theme_bw()
+
+
+```
+
+Построим потоковый график для ожидаемого уровня образования в волне 2 и текущего метса обучения в волне 5 в зависимости от уровня грамотности респондента.
+
+```{r}
+freq_table <- group_by(data_fct, math_lev3, np2wish, wherenp5) %>% summarise(freq = n())
+
+ggplot(data = freq_table,
+       aes(weight = freq, axis1 = math_lev3, axis2 = np2wish, axis3 = wherenp5)) +
+  geom_alluvium(aes(fill = math_lev3), width = 1/12) +
+  geom_stratum(width = 1/8) +
+  geom_label(stat = "stratum", label.strata = TRUE)
+
+```
+
+
+Так как текущий доход измерен на порядковой шкале, вместо диаграммы рассеяния построим боксплоты и графики-виолончели для ожидаемого дохода. Так как некоторые респонденты давали нереалистичные прогнозы, мы сделали график только для тех, кто отметил ожидаемый доход ниже 200 т.р.
+
+```{r}
+data_salary <- subset(data_fct, np5_q55 < 200000)
+
+ggplot(data = data_salary) +
+  geom_boxplot(aes(x = np5_q79, y = np5_q55)) +
+  labs(x = 'Текущий доход', y = 'Ожидаемый доход', title = 'Текущий и ожидаемый доход в волне 5') +
+  theme_bw()
+
+ggplot(data = data_salary) +
+  geom_violin(aes(x = np5_q79, y = np5_q55)) +
+  labs(x = 'Текущий доход', y = 'Ожидаемый доход', title = 'Текущий и ожидаемый доход в волне 5') +
+  theme_bw()
+```
+
+В целом, чем выше текущий личный доход респондента, тем больший доход он ожидает после окончания ВУЗа. И в данном случае боксплоты явно привлекательнее)
+
+Посмотрим на корреляцию между баллом ЕГЭ по математике и ожидаемым доходом:
+```{r}
+wage_cor <- cor(data_salary$np5_q55, data_salary$np4_q7, use = "complete.obs" )
+wage_cor
+
+ggscatter(data_salary, x = "np4_q7", y = "np5_q55", 
+          add = "reg.line", conf.int = TRUE, 
+          cor.coef = TRUE, cor.method = "pearson",
+          xlab = "Балл ЕГЭ по математике", ylab = "Ожидаемый доход после ВУЗа")
+```
+
+Корреляция крайне слабая, но значимая.
+
+# Кластеризация
+Попробуем кластеризовать респондентов по набору их ожиданий в отношении образования, получаемого образования и математической грамотности. Так как мы не имеем ни млейшего понятия, как могут группироваться данные, прибегнем к иерархическому анализу. 
+
+```{r}
+data_clust2 <- subset(data, select = c(idstud, math_lev3, np2study, np2wish) , np2study != "NA")
+data_clust <- subset(data_clust2, np2wish != "NA")
+
+clust_data <- dist(data_clust,  method = 'euclidian')
+
+#hier <- hclust(data_clust, method = "ward.D2", members = NULL)
+#fviz_dend(hier) 
+
+```
+
+Note: я очень долго билась с тем, чтобы засунуть факторные переменные в кластерный анализ, как это делается в стате. Но R упорно писал "NAs introduced by coercion". Если я правильно понимаю, это невозможно, и мы теперь должны гадать, что за цифры там на деревьях. 
+
+Кроме того, hclust получается через раз - и не видно никакой системы в том, когда он получается, а когда пишет Error in if (is.na(n) || n > 65536L) stop("size cannot be NA nor exceed 65536") : 
+  missing value where TRUE/FALSE needed
+
+
+Кажется (в тот момент, когда получается hclust), что оптимальное число кластеров 5. Так и сделаем. 
+```{r}
+clust_n <- hcut(data_clust, k = 5, hc_metric = 'euclidean', hc_method = 'ward.D2')
+fviz_dend(clust_n,  cex = 0.5,  color_labels_by_k = TRUE) 
+```
+
+Изобразим полученные кластеры в осях главных компонент
+```{r}
+#data_pca <- prcomp(data_clust, na.rm = TRUE)
+#fviz_pca_ind(data_pca, repel = TRUE)
+```
+Опять что-то про миссинги (Error in svd(x, nu = 0, nv = k) : infinite or missing values in 'x')
+
+# Линейная регрессия
+Построи регрессию с ожидаемой зарплатой в качестве зависимой переменной и уровнем грамотности по математике, баллом ЕГЭ по математике, ожиданиями от уровня образования и текущего места обучения в волне 2 в качестве независимых.
+```{r}
+reg_salary <- lm(data = data_salary, np5_q55 ~ math_lev3 + np4_q7 + I(np2study == "Не учится") + I(np2study == "Школа") +  I(np2wish == "Школа") + I(np2wish == "СПО") + I(np2wish == "2 ВО или степень"), na.action = na.omit)
+summary(reg_salary)
+
+coefci(reg_salary)
+plot_model(reg_salary, ci.lvl = 0.9)
+```
+С боле высокими зарплатными ожиданиями положительно связан балл ЕГЭ по математике и ожидаемый уровень образования - 2 высших или ученая степень. Число тех, кто не обучался во второй волне, крайне мало (2 человека), так что этим коэффициентом можем пренебречь.Однако уровень математической грамотности оказался не связан с ожиданиями - возможно, из-за включения в модель балла ЕГЭ. Проверим модель без ЕГЭ.
+
+```{r}
+reg_salary2 <- lm(data = data_salary, np5_q55 ~ math_lev3 +  I(np2study == "Не учится") + I(np2study == "Школа") +  I(np2wish == "Школа") + I(np2wish == "СПО") + I(np2wish == "2 ВО или степень"), na.action = na.omit)
+summary(reg_salary2)
+```
+
+Действительно, при исключении балла ЕГЭ из модели уровень математичекой грамотности оказался положительно связан с ожидаемой заработной платой. Кроме того, значимо положительно связано обучение в школе во второй волне по сравнению с обучением в СПО. Однако пропала значимость у коэффициента для высоких ожиданий для максимального уровня образования. 
+
+Сравним модель с ЕГЭ и без ЕГЭ
+```{r}
+#waldtest.default(reg_salary, reg_salary2)
+
+```
+Не работает и пишет, что models were not all fitted to the same size of dataset - абсолютно не знаю, что с этим делать( 
+
+#  Классификация
+
+```{r}
+set.seed(101)
+train_rows <- createDataPartition(data_fct$np5plans,  p = 0.6, list = FALSE)
+sample_train <- data_salary[train_rows, ]
+sample_test <- data_salary[-train_rows, ]
+```
+
+Построим прогноз на тестовой части выборки.
+```{r}
+choice_model <- train(data = sample_train, np5plans ~ I(np2study == "Не учится") + I(np2study == "Школа") +  I(np2wish == "Школа") + I(np2wish == "СПО") + I(np2wish == "2 ВО или степень"), family = binomial(link = 'logit'), method = 'glm', na.action = na.omit)
+summary(choice_model)
+
+choice_pred <- predict(choice_model, newdata = sample_train, na.action = na.omit)
+head(choice_pred)
+
+choice_prob <- predict(choice_model, newdata = sample_train, type = "prob" , na.action = na.omit)
+head(choice_prob)
+
+#confusionMatrix(data = choice_pred, reference = sample_test$np5plans, na.action = na.omit)
+```
+Если респондент учился в школе, то его шансы желать продолжить обучение выше, чем если он учился в СПО. И гораздо выше шансы желания продолжить обучение, если максимальный желаемый уровень образования - 2 высших или степень.
+
+
+Про матрицу же пишет, что all arguments must have the same length - не понимаю его, ведь я сделала одну и ту же модель ((
+
+Нарисуем ROC-кривую
+```{r}
+# choice_model_set <- data.frame(H = choice_prob$H, L = choice_prob$L,pred = choice_pred, obs = sample_test$np5plans)
+
+#ggplot(choice_model_set, aes(d = obs, m = L)) +
+#  geom_roc(n.cuts = 0)
+
+```
+То же - пишет, что аргументы подразумевают разное количество строк.
+
+Итого: от некоторых ошибок избавиться так и не удалось. Нужен отдельный курс по работе с пропущенными значениями в R - куда их деть, чтобы не мешались.
